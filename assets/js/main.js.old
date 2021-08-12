@@ -1,0 +1,12 @@
+(function ($) {
+    "use strict";
+    /* Sticky header */
+    $window.scroll(function () {
+        if ($window.scrollTop() > 200) {
+            $('.header-sec').addClass('sticky-header');
+        } else {
+            $('.header-sec').removeClass('sticky-header');
+        }
+    });
+
+})(jQuery);

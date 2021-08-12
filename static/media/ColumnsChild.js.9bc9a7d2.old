@@ -1,0 +1,1316 @@
+import React from "react";
+import { connect } from "react-redux";
+import { withRouter, Link } from "react-router-dom";
+import { Responsive } from "common/react-grid-layout";
+import SiteLogo from "host/components/UI/Logo/SiteLogo";
+import Parent from "host/components/Parent";
+import { calcXY } from "common/react-grid-layout";
+import {
+  siteProfileActions,
+  customizationActions,
+} from "common/_redux/_actions/index";
+import { alertActions } from "frontend/redux/_actions/index";
+import isEqual from "react-fast-compare";
+import clonedeep from "lodash.clonedeep";
+
+import {
+  duplicateComponent,
+  findCollisionLayoutFromChildren,
+  isChildInsideParent,
+  findOverlapPercentage,
+  findLayout,
+  setGuideLinesHelper,
+  whatChanged,
+  isArrayEqual,
+} from "frontend/Builder/BuilderComponents";
+
+const GridLayout = Responsive;
+
+class ColumnsChild extends React.Component {
+  constructor(props) {
+    console.log("SectionDivBlock - mounting", props.client_id);
+    super(props);
+    this.state = {
+      topGuide: {},
+      rightGuide: {},
+      bottomGuide: {},
+      leftGuide: {},
+      currentBreakpoint: "lg",
+      view: "web",
+      searchText: "",
+      layouts: {},
+      builderLayout: {},
+      highestIndex: 0,
+      editOption: false,
+      components: [],
+      resized: false,
+      lazyComponents: [],
+      breakpoint: "lg",
+      initialRenderComplete: false,
+      dragStop: false,
+      // currentlyDraggedElement: null,
+      // Revisions(Undo/Redo)
+      layout_history: [],
+      revision_index: 1,
+      showEditor: false,
+      childWidth: {
+        lg: 1400,
+        md: 780,
+        sm: 400,
+      },
+    };
+    this.node = React.createRef();
+  }
+
+  async componentDidMount() {
+    this.layouts = this.props.columnsId || this.props.parent_id || "layouts";
+    const { currentBreakpoint } = this.state;
+    const { blueprint, screenWidth, client_id } = this.props;
+
+    const builderCanvas = document.getElementById("slBuilder");
+    this.canvasHeight = builderCanvas.offsetHeight;
+    this.canvasWidth = builderCanvas.offsetWidth;
+
+    //Case: Adding the component into the state after initial fetch
+
+    let lazyComponents = [],
+      context;
+
+    //Context from store isn't available yet.
+    //So, using the value from window in the mean time
+    window.location.hash === undefined || window.location.hash === ""
+      ? (context = "home")
+      : (context = window.location.hash.substr(1));
+
+    let currentPage =
+      blueprint && blueprint[context] && blueprint[context].components
+        ? blueprint[context].components
+        : {};
+    // The components object is being mutated in the following section of code. You can create a deep clone of the current page, but the right dock will disappear for the component
+    // currentPage = clonedeep(currentPage);
+
+    let dummyComponentExists =
+      Object.getOwnPropertyNames(currentPage).length == 1 &&
+      Object.getOwnPropertyNames(currentPage)[0] === "dummComponent";
+
+    if (!dummyComponentExists) {
+      try {
+        // Do not remove the asyncOutput variable.
+        // The asynchronousOutput is used to wait until the async await cycle finishes.
+        let asyncOuput = async () => {
+          return await Promise.all(
+            Object.keys(currentPage)
+              .filter((key) => {
+                return currentPage[key].parent === client_id;
+              })
+              .map(async (key) => {
+                let component = currentPage[key];
+                if (component.wrapper === "true") {
+                  component.components.map(async (k, index) => {
+                    component["component"][index] = await import(
+                      /* webpackMode: "eager" */ `../../${currentPage[key].components[index].main}`
+                    );
+                  });
+                } else {
+                  component["component"] = await import(
+                    /* webpackMode: "eager" */ `../../${currentPage[key].main}`
+                  );
+                }
+                lazyComponents.push(component);
+              })
+          );
+        };
+        this.setState({
+          lazyComponents,
+          asyncOut: await asyncOuput(),
+          components: blueprint[context].components,
+          layout_history: [
+            {
+              layouts: blueprint[context].layouts,
+              lazyComponents: lazyComponents,
+              components: blueprint[context].components,
+            },
+          ],
+        });
+      } catch (err) {
+        console.error("error", err);
+      }
+    }
+
+    let dummyWidths = { lg: screenWidth, md: 780, sm: 400 };
+    let width = {};
+
+    let testCondition = blueprint[context][this.layouts]["lg"].filter(
+      (item) => item.i === client_id
+    );
+
+    if (
+      !(
+        typeof testCondition === "undefined" ||
+        typeof testCondition[0] === "undefined"
+      )
+    ) {
+      width = { ...dummyWidths };
+      width[currentBreakpoint] =
+        (this.node.current && this.node.current.clientWidth) ||
+        dummyWidths[currentBreakpoint];
+    }
+
+    this.setState({ childWidth: width });
+    // remove href from all <a> inside builder
+    const aTags = document.getElementById("slBuilder")
+      ? document.getElementById("slBuilder").getElementsByTagName("a")
+      : [];
+    for (let i = 0; i < aTags.length; i++) {
+      aTags[i].href = "";
+    }
+  }
+
+  updateChildWidth = (dummyWidths) => {
+    const { currentBreakpoint } = this.state;
+    let width = {};
+    width = { ...dummyWidths };
+    width[currentBreakpoint] =
+      this.node.current.clientWidth || dummyWidths[currentBreakpoint];
+
+    this.setState({ childWidth: width });
+  };
+
+  async componentDidUpdate(prevProps, prevState) {
+    const { blueprint, context, screenWidth, client_id } = this.props;
+    const { currentBreakpoint } = this.state;
+
+    whatChanged(
+      prevProps,
+      this.props,
+      prevState,
+      this.state,
+      this.props.client_id
+    );
+    console.log("SectionDivBlock", "componentDidUpdate");
+    let dummyWidths = { lg: screenWidth, md: 780, sm: 400 };
+
+    if (prevProps.width !== this.props.width) {
+      console.log("width updated");
+      this.updateChildWidth(dummyWidths);
+    }
+    if (
+      !this.state.dragStop ||
+      prevProps.deletionKey !== this.props.deletionKey ||
+      (prevState.dragStop &&
+        !this.state.dragStop &&
+        this.props.isUpdatingBluePrint)
+    ) {
+      try {
+        if (
+          this.props.resized !== prevProps.resized &&
+          (this.props.recentlyResizedComp === this.props.client_id ||
+            prevProps.recentlyResizedComp === this.props.client_id)
+        ) {
+          this.updateChildWidth(dummyWidths);
+        }
+
+        const { builderAction, builderCount, view } = this.props;
+
+        //To keep track of the current breakpoint
+
+        if (prevProps.view !== view || prevProps.view !== this.state.view) {
+          let currentBreakpoint =
+            view === "tablet" ? "md" : view === "mobile" ? "sm" : "lg";
+
+          // this.ungroupComponents();
+          // this.ungroupComponents();
+
+          this.setState({ currentBreakpoint, view: view });
+        }
+
+        const {
+          isDeletingComponent,
+          recentlyremovedComponentId,
+          isUpdatingBluePrint,
+          updateComplete,
+          recentlyUpdatedComponents,
+          deletionKey,
+        } = this.props;
+        let { recentlyAddedComponent } = this.props;
+
+        if (prevProps.view !== this.props.view) {
+        }
+        if (
+          !isArrayEqual(
+            prevProps.recentlyUpdatedComponents,
+            recentlyUpdatedComponents
+          )
+        ) {
+          let updatedLazyComponents = this.state.lazyComponents.filter(
+            (item) => {
+              return !recentlyUpdatedComponents.includes(item.client_id);
+            }
+          );
+          let currentPage =
+            blueprint && blueprint[context].components
+              ? blueprint[context].components
+              : {};
+          // currentPage = JSON.parse(JSON.stringify(currentPage));
+
+          Object.keys(currentPage).map((key) => {
+            if (recentlyUpdatedComponents.includes(key)) {
+              updatedLazyComponents = [
+                ...updatedLazyComponents,
+                currentPage[key],
+              ];
+            }
+          });
+          this.setState({ lazyComponents: updatedLazyComponents });
+        }
+        //Case: Deleting a component
+        if (prevProps.isDeletingComponent && !isDeletingComponent) {
+          if (typeof recentlyremovedComponentId === "string") {
+            setTimeout(() => {
+              this.setState((prevState) => {
+                return {
+                  lazyComponents: prevState.lazyComponents.filter((item) => {
+                    return item.client_id !== recentlyremovedComponentId;
+                  }),
+                };
+              });
+            }, 11);
+          } else if (typeof recentlyremovedComponentId === "object") {
+            let newLazyComponents = this.state.lazyComponents;
+
+            let updatedComponents = newLazyComponents.filter((item, i) => {
+              let flag = true;
+
+              recentlyremovedComponentId.map((removedComponent) => {
+                item.client_id === removedComponent ? (flag = false) : null;
+              });
+
+              return flag;
+            });
+
+            this.setState({ lazyComponents: updatedComponents }, () => {
+              this.props.updateComplete(1, this.props.client_id);
+            });
+          }
+        }
+
+        //Case: Deleting multiple components
+
+        //Donor to Host Deletion (from Donor)
+
+        //Case: Updating blueprint: The third condition might break
+
+        console.log(
+          "SectionDivBlock",
+          "componentDidUpdate",
+          prevState.dragStop && !this.state.dragStop && isUpdatingBluePrint,
+          !prevProps.isUpdatingBluePrint && isUpdatingBluePrint,
+          this.props.client_id
+        );
+        if (
+          (!prevProps.isUpdatingBluePrint && isUpdatingBluePrint) ||
+          (prevState.dragStop && !this.state.dragStop && isUpdatingBluePrint)
+        ) {
+          let updateRequired = false;
+          let updatedLazyComponents = [];
+          const { lazyComponents } = this.state;
+
+          let currentPage =
+            blueprint && blueprint[context].components
+              ? blueprint[context].components
+              : {};
+          // currentPage = JSON.parse(JSON.stringify(currentPage));
+
+          let multipleComponentsAdded =
+            Object.getOwnPropertyNames(recentlyAddedComponent).length > 1;
+
+          if (!multipleComponentsAdded) {
+            let newComponent = Object.getOwnPropertyNames(
+              recentlyAddedComponent
+            )[0];
+
+            currentPage[newComponent] = recentlyAddedComponent[newComponent];
+            let component = currentPage[newComponent];
+            console.log(
+              typeof component.parent === "string",
+              component.parent === client_id,
+              "SectionDivBlock",
+              "componentDidUpdate"
+            );
+            if (
+              component &&
+              typeof component.parent === "string" &&
+              component.parent === client_id
+            ) {
+              if (!lazyComponents.some((e) => e.client_id === newComponent)) {
+                if (component.wrapper === "true") {
+                  component.components.map(async (k, index) => {
+                    index === 0 ? (component["component"] = []) : null;
+                    component["component"][index] = await import(
+                      /* webpackMode: "eager" */ `../../${currentPage[newComponent].components[index].main}`
+                    );
+                  });
+                } else {
+                  component["component"] = await import(
+                    /* webpackMode: "eager" */ `../../${currentPage[newComponent].main}`
+                  );
+                }
+                setTimeout(() => {
+                  this.setState(
+                    (prevState) => ({
+                      lazyComponents: [...prevState.lazyComponents, component],
+                    }),
+                    () => {
+                      this.props.updateComplete(2, this.props.client_id);
+                    }
+                  );
+                }, 50);
+              } else {
+                this.setState(
+                  {
+                    lazyComponents: lazyComponents.map((el) =>
+                      el.client_id === newComponent
+                        ? Object.assign({}, el, {
+                            props: component.props,
+                            zIndex: component.zIndex,
+                          })
+                        : el
+                    ),
+                  },
+                  () => updateComplete(3, this.props.client_id)
+                );
+              }
+            } else if (
+              component &&
+              ((typeof component.parent === "string" &&
+                component.parent !== client_id &&
+                deletionKey === "DONOR_TO_HOST") ||
+                (typeof component.parent === "undefined" &&
+                  deletionKey === "DONOR_TO_CANVAS"))
+            ) {
+              let name = Object.getOwnPropertyNames(recentlyAddedComponent)[0];
+
+              this.setState(
+                (prevState) => {
+                  return {
+                    lazyComponents: prevState.lazyComponents.filter((item) => {
+                      return item.client_id !== name;
+                    }),
+                  };
+                },
+                () => {
+                  updateComplete(4, this.props.client_id);
+                }
+              );
+            }
+          } else {
+            let componentArray = [];
+            //ungroup Use case - A duplicate of the previous usecase with single component
+            Object.keys(recentlyAddedComponent).map(
+              async (newComponent, index) => {
+                currentPage[newComponent] =
+                  recentlyAddedComponent[newComponent];
+                let component = currentPage[newComponent];
+                if (
+                  component &&
+                  typeof component.parent === "string" &&
+                  component.parent === client_id
+                ) {
+                  if (
+                    !lazyComponents.some((e) => e.client_id === newComponent)
+                  ) {
+                    if (component.wrapper === "true") {
+                      component.components.map(async (k, index) => {
+                        if (index === 0) {
+                          component["component"] = [];
+                        }
+                        component["component"][index] = await import(
+                          /* webpackMode: "eager" */ `../../${currentPage[newComponent].components[index].main}`
+                        );
+                      });
+                      componentArray.push(component);
+                    } else {
+                      component["component"] = await import(
+                        /* webpackMode: "eager" */ `../../${currentPage[newComponent].main}`
+                      );
+
+                      componentArray.push(component);
+                    }
+                  } else {
+                    updateRequired = true;
+
+                    if (index === 0)
+                      updatedLazyComponents = lazyComponents.filter((e) => {
+                        // console.log(
+                        //   e.client_id != newComponent,
+                        //   e.client_id,
+                        //   newComponent,
+                        //   "lazyComponents22"
+                        // );
+                        return e.client_id != newComponent;
+                      });
+                    else
+                      updatedLazyComponents = updatedLazyComponents.filter(
+                        (e) => {
+                          return e.client_id != newComponent;
+                        }
+                      );
+
+                    component["component"] = await import(
+                      /* webpackMode: "eager" */ `../../${currentPage[newComponent].main}`
+                    );
+                    componentArray.push(component);
+                  }
+                }
+              }
+            );
+
+            if (!updateRequired) {
+              setTimeout(() => {
+                this.setState(
+                  (prevState) => ({
+                    lazyComponents: [
+                      ...prevState.lazyComponents,
+                      ...componentArray,
+                    ],
+                  }),
+                  () => {
+                    this.props.updateComplete(5, this.props.client_id);
+                  }
+                );
+              }, 50);
+            } else {
+              setTimeout(() => {
+                this.setState(
+                  (prevState) => ({
+                    lazyComponents: [
+                      ...updatedLazyComponents,
+                      ...componentArray,
+                    ],
+                  }),
+                  () => {
+                    this.props.updateComplete(6, this.props.client_id);
+                  }
+                );
+              }, 10);
+            }
+          }
+        }
+      } catch (err) {
+        console.error(err, "error");
+        this.props.updateComplete(7, this.props.client_id);
+
+        // this.props.showErrorAlert(err);
+        // window.setTimeout(() => {
+        //   window.location.reload(false);
+        // }, 1000);
+      }
+    }
+  }
+
+  showEditorView = (e) => {
+    this.setState({
+      showEditor: e,
+    });
+  };
+
+  shortCuts = (event) => {
+    // Copy paste
+    if (event.ctrlKey && event.keyCode === 86) {
+      const {
+        blueprint,
+        context,
+        selectedComponent,
+        updateBlueprint,
+      } = this.props;
+      if (selectedComponent && !this.state.showEditor) {
+        duplicateComponent(
+          blueprint,
+          blueprint[context].layouts,
+          context,
+          selectedComponent,
+          updateBlueprint
+        );
+      }
+    }
+  };
+
+  toggleEditOption = (val) => this.setState({ editOption: val });
+
+  onComponentEdit = (comps) => {
+    this.setState({ components: comps });
+  };
+
+  setGuideLines = (layoutItem) => {
+    let toggleShowLayout = this.props.toggleShowLayout;
+    let guidelines;
+    if (layoutItem) {
+      const { documentContext } = this.props;
+      const _doc = documentContext ? documentContext : document;
+
+      const clickedEle =
+        layoutItem && layoutItem.i ? _doc.getElementById(layoutItem.i) : null;
+
+      guidelines = setGuideLinesHelper(
+        toggleShowLayout,
+        clickedEle,
+        this.canvasHeight,
+        this.canvasWidth
+      );
+    } else {
+      guidelines = {
+        topGuide: {},
+        rightGuide: {},
+        bottomGuide: {},
+        leftGuide: {},
+      };
+    }
+    this.props.setGuidelines(guidelines);
+  };
+
+  onDrag = (a, b, c, d, e, f) => {
+    // c = new item
+    const { view, autoResponsiveComps, updateAutoResponsiveComps } = this.props;
+    const selectedId = c.i;
+    if (!this.element) this.element = f;
+
+    this.counter++;
+    if (this.counter % 3 === 0) this.setGuideLines(c);
+
+    // view === "web" && e.target.scrollIntoView(false);
+
+    // removing the specific cID from auto responsive{ sm:[], md:[]}
+    if (view === "mobile" && autoResponsiveComps.sm.includes(selectedId)) {
+      //remove from sm
+      let updatedArr = autoResponsiveComps.sm.filter(
+        (item) => item !== selectedId
+      );
+      let updatedObj = {
+        sm: updatedArr,
+        md: autoResponsiveComps.md,
+      };
+      updateAutoResponsiveComps(updatedObj);
+    }
+    if (view === "tablet" && autoResponsiveComps.md.includes(selectedId)) {
+      //remove from md
+      let updatedArr = autoResponsiveComps.md.filter(
+        (item) => item !== selectedId
+      );
+      let updatedObj = {
+        sm: autoResponsiveComps.sm,
+        md: updatedArr,
+      };
+      updateAutoResponsiveComps(updatedObj);
+    }
+  };
+  onDragStart = (a, b, c, d, e, f) => {
+    this.counter = 0;
+
+    this.childSettings = (({
+      offsetTop,
+      offsetLeft,
+      offsetHeight,
+      offsetWidth,
+    }) => ({ offsetTop, offsetLeft, offsetHeight, offsetWidth }))(f);
+    this.parentSettings = (({
+      offsetTop,
+      offsetLeft,
+      offsetHeight,
+      offsetWidth,
+    }) => ({ offsetTop, offsetLeft, offsetHeight, offsetWidth }))(
+      f.parentNode.parentNode.parentNode
+    );
+
+    // Position absolute - everuthing is put into this.element
+    this.element = [f];
+    let count = 0;
+    while (this.element[count].parentNode.id !== "sl-rgl") {
+      this.element.push(this.element[count].parentNode);
+      count += 1;
+      console.log("hoho", this.element[count].id, count);
+      if (
+        this.element[count].id &&
+        this.element[count].id.endsWith("childSection")
+      )
+        this.element[count].style.position = "absolute";
+    }
+
+    this.setState({ dragStop: true });
+  };
+
+  onDragStop = (a, b, c, d, e, f) => {
+    this.counter = 0;
+    this.setGuideLines(null);
+
+    let count = this.element.length;
+    console.log("count", count);
+    //comparing old values with the new ones
+
+    while (count - 1 >= 0) {
+      let poppedElement = this.element.pop();
+      count += -1;
+      console.log("hoho", poppedElement, count);
+      if (poppedElement.id && poppedElement.id.endsWith("childSection"))
+        poppedElement.style.position = "relative";
+    }
+
+    this.childSettings = (({
+      offsetTop,
+      offsetLeft,
+      offsetHeight,
+      offsetWidth,
+    }) => ({ offsetTop, offsetLeft, offsetHeight, offsetWidth }))(f);
+
+    console.log(this.childSettings, this.parentSettings, "isChildInside");
+    //shouldCollide - check if the element is outside the boundingrect of the immediate parent
+    const { top, right, bottom, left } = isChildInsideParent(
+      this.childSettings,
+      this.parentSettings,
+      this.element,
+      this.status
+    );
+
+    let overlapPercentage = findOverlapPercentage(
+      this.childSettings,
+      this.parentSettings
+    );
+    console.log(overlapPercentage, top, bottom, left, right, "isChildinside");
+    //Check if the element is within its immediate parent
+    // if ((top || bottom || left || right) && (overlapPercentage < 90 || overlapPercentage > 100)) {
+    const { blueprint, context, screenWidth } = this.props;
+    const { currentBreakpoint } = this.state;
+    let fOffsetTop = 0,
+      fOffsetLeft = 0;
+    let element = f;
+    let i = 0;
+    let dupe = clonedeep(c);
+    let page = clonedeep(blueprint[context]);
+    //loop to find the offset relative to sl-rgl
+    do {
+      console.log("dogg0", i, dupe, fOffsetTop, fOffsetLeft);
+
+      if (i === 0) {
+        fOffsetTop = fOffsetTop + element.offsetTop;
+        fOffsetLeft = fOffsetLeft + element.offsetLeft;
+      } else {
+        let { offsetTop, offsetLeft } = document.getElementById(dupe.parent);
+        fOffsetTop = fOffsetTop + offsetTop;
+        fOffsetLeft = fOffsetLeft + offsetLeft;
+        dupe = page.components[dupe.parent];
+      }
+      i += 1;
+      console.log("dogg1", i, dupe, fOffsetTop, fOffsetLeft);
+    } while (dupe.parent !== undefined);
+
+    // Convert the x,y values to grid values
+    let pageLayout = {};
+    pageLayout[currentBreakpoint] = calcXY(fOffsetTop, fOffsetLeft, {
+      ...blueprint[context].meta.gridLayout,
+      containerWidth: screenWidth,
+      cols: blueprint[context].meta.gridLayout.cols[currentBreakpoint],
+    });
+
+    let layout = {};
+    let updatedLayout = {};
+    const parent_id = c.parent;
+    Object.keys(blueprint[context][this.layouts]).map((col) => {
+      return (layout[col] = blueprint[context][this.layouts][col].filter(
+        (item) => item.i === parent_id
+      ));
+    });
+    updatedLayout = {
+      lg: [
+        {
+          ...c,
+          x: pageLayout["lg"].x,
+          y: pageLayout["lg"].y,
+          parent: undefined,
+        },
+      ],
+    };
+
+    console.log(top, right, bottom, left, "isChildInside");
+
+    // Collision management
+    // You'll need to take the grid values from the meta of the page and convert it here
+    //  You'll also need to do some auto responsive things.
+    //new collision management
+    const allLayouts = clonedeep(blueprint[context].layouts[currentBreakpoint]);
+    const currentGridCols = blueprint[context].meta.gridLayout.cols;
+    // let page = clonedeep(blueprint[context]);
+
+    const collisions = findCollisionLayoutFromChildren(
+      allLayouts,
+      clonedeep(updatedLayout["lg"][0]),
+      page,
+      currentGridCols,
+      currentBreakpoint
+    );
+    console.log(
+      collisions,
+      allLayouts,
+      layout,
+      clonedeep(updatedLayout["lg"][0]),
+      "position0"
+    );
+
+    if (collisions) {
+      this.props.exchangeChildren(
+        collisions,
+        a,
+        updatedLayout[currentBreakpoint][0],
+        layout[currentBreakpoint][0]
+      );
+    } else {
+      this.props.exchangeChildren(
+        collisions,
+        a,
+        updatedLayout[currentBreakpoint][0],
+        layout[currentBreakpoint][0]
+      );
+    }
+    // }
+
+    this.setState({
+      elementScreenPosition: c,
+      dragStop: !this.state.dragStop,
+      // currentlyDraggedElement: null
+    });
+  };
+  handleRef = (ref, componentId) => {};
+
+  renderLinks = (links) => {
+    return (
+      links &&
+      links.map((linkitem, i) => {
+        let link =
+          linkitem.name.charAt(0).toUpperCase() + linkitem.name.slice(1);
+
+        return (
+          <li key={i}>
+            <a href={linkitem.url}>{link}</a>
+          </li>
+        );
+      })
+    );
+  };
+  renderComponents(component, Component) {
+    const { logo } = this.props.siteData;
+    const { siteData, client_id } = this.props;
+    // const { style, className, src, ...rest } = this.props;
+
+    console.log(component, this.props.client_id, "SectionDivBlock");
+
+    switch (component.category) {
+      case "Card List":
+        return (
+          <Component
+            {...component.props}
+            updateRef={(ref) => this.handleRef(ref, component.client_id)}
+          />
+        );
+      case "navbar":
+        return (
+          // <Header originalProps={this.props}>
+          <Component
+            {...component.props}
+            logo={
+              // <Link to="/" class="site-nav-logo">
+              <SiteLogo
+                pathname="/builder"
+                color="white"
+                type="horizontal"
+                scale="0"
+                rWidth="60px"
+                rHeight="60px"
+                width="140px"
+                height="36px"
+                sitedetails={siteData && siteData}
+                logo={logo && logo.horizontal}
+                // logoIcon={logo && logo.round}
+                // view={this.props.view}
+              />
+            }
+            navMenu={this.renderLinks(siteData.links)}
+            navMenuRaw={siteData.links}
+            updateRef={(ref) => this.handleRef(ref, component.client_id)}
+          />
+          // </Header>
+        );
+      case "footer": {
+        return (
+          // <CardFooter
+          //   originalProps={this.props}
+          //   showFooter
+          //   // currentStyles={component.props && component.props.componentStyle}
+          // >
+          <Component
+            {...component.props}
+            logo={
+              <Link to="/" class="site-nav-logo">
+                <SiteLogo
+                  pathname="/builder"
+                  color="white"
+                  type="horizontal"
+                  scale="0"
+                  rWidth="60px"
+                  rHeight="60px"
+                  width="140px"
+                  height="36px"
+                  sitedetails={siteData && siteData}
+                  logo={logo && logo.horizontal}
+                  // logoIcon={logo && logo.round}
+                  // view={this.props.view}
+                />
+              </Link>
+            }
+            navMenu={this.renderLinks(siteData.links)}
+            navMenuRaw={siteData.links}
+            updateRef={(ref) => this.handleRef(ref, component.client_id)}
+          />
+          // </CardFooter>
+        );
+      }
+      default:
+        return (
+          <Component
+            key={component.client_id}
+            client_id={component.client_id}
+            parent_id={client_id}
+            name={component.name}
+            category={component.category}
+            {...component.props}
+            // updateRef={ref => this.handleRef(ref, component.client_id)}
+          />
+        );
+    }
+  }
+
+  ungroupComponents = () => {};
+
+  //Specific to GridLayout Child
+  onResizeStop = () => {
+    this.setState({ resized: false }); //lg.w * width/100
+  };
+
+  render = () => {
+    const {
+      editOption,
+      lazyComponents,
+      childWidth,
+      dragStop,
+      currentBreakpoint,
+
+      // currentlyDraggedElement
+    } = this.state;
+    const {
+      view,
+      screenWidth,
+      gridLayout,
+      context,
+      windowContext,
+      documentContext,
+      blueprint,
+      client_id,
+      recentlyResizedComp,
+      columnsId,
+      resized,
+      canvasTransform,
+    } = this.props;
+    let layouts = { lg: [], sm: [], md: [] };
+
+    if (blueprint[context][client_id])
+      Object.keys(blueprint[context][client_id]).map((col) => {
+        return (layouts[col] = this.props.blueprint[context][client_id][
+          col
+        ].filter((item) => {
+          return item.parent === client_id;
+        }));
+      });
+    let parent = findLayout(columnsId, blueprint[context]);
+    let parentH = parent[currentBreakpoint] && parent[currentBreakpoint][0].h;
+    console.log(lazyComponents, client_id, "drone1");
+    console.log(
+      "SectionDivBlock - render",
+      lazyComponents,
+      client_id,
+      this.state.dragStop
+    );
+    if (!this.props.client_id) {
+      throw new Error("client_id is undefined");
+    }
+    let dragHandle = "." + client_id + "-parent-handle";
+    console.log(
+      childWidth,
+      client_id,
+      this.node.current && this.node.current.clientWidth,
+      "childWidth"
+    );
+    return (
+      <section
+        id={client_id + "-childSection"}
+        ref={this.node}
+        className="rgl-container"
+      >
+        <div className="rgl-bg"></div>
+        {layouts && (
+          <GridLayout
+            dragStop={this.state.dragStop}
+            // id={"sl-rgl"}
+            style={{ zIndex: "0" }}
+            maxRows={parentH}
+            width={
+              view === "mobile"
+                ? childWidth.sm
+                : view === "tablet"
+                ? childWidth.md
+                : childWidth.lg
+            }
+            isDraggable={true}
+            isResizable={true}
+            className="layout"
+            verticalCompact={false}
+            // compactType={null}
+            layouts={layouts}
+            {...(this.props.blueprint[context].meta.gridLayout
+              ? this.props.blueprint[context].meta.gridLayout
+              : gridLayout)}
+            onLayoutChange={this.handleLayoutChange}
+            useCSSTransforms={false}
+            preventCollision={true}
+            onDrag={(a, b, c, d, e, f) => this.onDrag(a, b, c, d, e, f)}
+            onDragStart={(a, b, c, d, e, f) =>
+              this.onDragStart(a, b, c, d, e, f)
+            }
+            onDragStop={(a, b, c, d, e, f) => this.onDragStop(a, b, c, d, e, f)}
+            // onResize={this._preventTextSelect}
+            onResizeStart={(a, b, c, d, e) => {
+              this.setState({ elementScreenPosition: c });
+            }}
+            onBreakpointChange={(newBreakpoint, newCol) => {
+              this.setState({ breakpoint: newBreakpoint });
+            }}
+            blueprintChanged={this.props.isUpdatingBluePrint}
+            fetched={this.props.layoutsInitialized}
+            // onResizeStop={() => {
+            //   this.onResizeStop();
+            // }}
+            transformScale={view === "web" ? canvasTransform : 1}
+            // transformDirectio="ltr"
+            draggableHandle={editOption ? ".move-s" : dragHandle}
+          >
+            {lazyComponents
+              .filter((component) => {
+                if (typeof component.hideIn === "undefined") return true;
+                else
+                  return (
+                    component.hideIn &&
+                    !component.hideIn.includes(this.state.currentBreakpoint)
+                  );
+              })
+              .map((component, index) => {
+                const Component = component.component.default;
+                const compProps = component.props;
+                //
+
+                let styleValue =
+                  compProps &&
+                  compProps.componentData &&
+                  compProps.componentData.children &&
+                  getTextType(compProps.componentData.children);
+                return (
+                  <div
+                    key={`${component.client_id}`}
+                    id={`${component.client_id}`}
+                    style={{ zIndex: String(component.zIndex) }}
+                    className="builder_img_09"
+                  >
+                    <Parent
+                      dragStop={this.state.dragStop}
+                      key={`${component.client_id}`}
+                      toggleShowEditor={(e) => this.showEditorView(e)}
+                      ungroupComponents={this.ungroupComponents}
+                      // onScreenCapture={onStartCapture}
+                      shiftKey={this.state.shiftKey}
+                      screenPosition={this.state.elementScreenPosition}
+                      // dragElement={currentlyDraggedElement}
+                      clientId={component.client_id.toString()}
+                      resized={resized}
+                      view={view}
+                      type={component.type}
+                      className={""}
+                      toggleEditOption={(e) => this.toggleEditOption(e)}
+                      onEdit={this.onComponentEdit}
+                      windowContext={windowContext}
+                      documentContext={documentContext}
+                      zIndex={component.zIndex}
+                      category={component.category}
+                      component={component}
+                      name={component.name}
+                      textFontFamily={
+                        component.hasOwnProperty("fontFamilyName")
+                          ? component.fontFamilyName
+                          : undefined
+                      }
+                      textFontSize={
+                        component.type === "text" &&
+                        ((compProps &&
+                          compProps.componentData &&
+                          compProps.componentData.responsiveFontSize &&
+                          compProps.componentData.responsiveFontSize.web) ||
+                        styleValue
+                          ? styleValue.web
+                          : "52")
+                      } // might need change (responsive)
+                    >
+                      {this.renderComponents(component, Component)}
+                    </Parent>
+                  </div>
+                );
+              })}
+          </GridLayout>
+        )}
+      </section>
+    );
+  };
+
+  handleLayoutChange = (layout, layouts) => {
+    layouts = clonedeep(layouts);
+    layout = clonedeep(layout);
+    layouts[this.state.currentBreakpoint] = layout;
+
+    const {
+      blueprint,
+      context,
+      saveLayout,
+      selectedComponent,
+      client_id,
+      view,
+      autoResponsiveComps,
+      isUpdatingBlueprint,
+      isDeletingComponent,
+      recentlyAddedComponent,
+    } = this.props;
+
+    if (true) {
+      if (this.state.initialRenderComplete) {
+        // auto responsiveness
+        if (view === "web" && layout.length !== 0) {
+          let selectedCompLayoutLG = {}; //lg only
+          layouts.lg.map((item) => {
+            if (item.i === selectedComponent) {
+              selectedCompLayoutLG = item;
+            }
+            return true;
+          });
+          if (autoResponsiveComps.sm.includes(selectedComponent)) {
+            layouts.sm.map((item, index) => {
+              if (item.i === selectedComponent && selectedCompLayoutLG !== {}) {
+                layouts.sm[index] = selectedCompLayoutLG;
+              }
+              return true;
+            });
+          }
+          if (autoResponsiveComps.md.includes(selectedComponent)) {
+            layouts.md.map((item, index) => {
+              if (item.i === selectedComponent && selectedCompLayoutLG !== {}) {
+                layouts.md[index] = selectedCompLayoutLG;
+              }
+              return true;
+            });
+          }
+        }
+
+        // compare previous and current layouts and save if changed.
+        if (
+          !isDeletingComponent &&
+          !isEqual(blueprint[context][client_id], layouts) &&
+          !isUpdatingBlueprint &&
+          (recentlyAddedComponent
+            ? Object.getOwnPropertyNames(recentlyAddedComponent).length < 1
+            : true)
+        ) {
+          Object.keys(layouts).map((col) => {
+            layouts[col] = layouts[col].filter((item) => {
+              return (
+                this.state.lazyComponents.filter(
+                  (val) => val.client_id === item.i
+                ).length > 0
+              );
+            });
+          });
+          //Saving the layout, this is important!
+          saveLayout(layouts, client_id);
+        }
+      } else {
+        this.setState({ initialRenderComplete: true });
+      }
+    }
+  };
+}
+
+// Hero.defaultProps = {};
+
+const mapStateToProps = (state) => {
+  return {
+    siteData: state.admin.siteProfile.data,
+    layoutsInitialized: state.admin.customization.present.layoutsInitialized,
+    view: state.admin.customization.present.data.view,
+    screenWidth: state.ui.screenWidth,
+    fetchSiteprofile: state.admin.customization.present.isFetching,
+    blueprint: state.admin.customization.present.data.blueprint,
+    gridLayout: state.admin.customization.present.gridLayout,
+    gridLayoutNew: state.admin.customization.present.data.gridLayout,
+    resized: state.admin.customization.present.resized,
+    recentlyResizedComp: state.admin.customization.present.recentlyResizedComp,
+    deletionKey: state.admin.customization.present.deletionKey,
+    isUpdatingLayout: state.admin.customization.present.isUpdating,
+    isUpdatingBluePrint: state.admin.customization.present.isUpdatingBluePrint,
+    isDeletingComponent: state.admin.customization.present.isDeletingComponent,
+    recentlyAddedComponent:
+      state.admin.customization.present.data.recentlyAddedComponent,
+    recentlyremovedComponentId:
+      state.admin.customization.present.data.recentlyremovedComponentId,
+    selectedComponent:
+      state.admin.customization.present.data.currentlySelectedComponentId,
+    context: state.admin.customization.present.context,
+    componentManifest: state.admin.customization.present.data.componentManifest,
+    // selectedComponentsArray:
+    //   state.admin.customization.present.data.currentlySelectedComponentArray,
+    undodata: state.admin.customization.present.undofunction,
+    isundoAction: state.admin.customization.present.isundoAction,
+    recentlyUpdatedComponents:
+      state.admin.customization.present.data.recentlyUpdatedComponents,
+    autoResponsiveComps: state.admin.customization.present.autoResponsiveComps,
+    toggleShowLayout: state.admin.customization.present.showCustomLayout,
+    canvasTransform: state.admin.customization.present.canvasTransform,
+  };
+};
+
+const mapDispatchToProps = (dispatch) => {
+  return {
+    exchangeChildren: (collisions, layouts, layout, donor) => {
+      dispatch(
+        customizationActions.exchangeChildren(
+          collisions,
+          layouts,
+          layout,
+          donor
+        )
+      );
+    },
+    setGuidelines: (prop) => {
+      dispatch(customizationActions.setGuidelines(prop));
+    },
+
+    showErrorAlert: (error) => {
+      dispatch(alertActions.error(error.toString()));
+    },
+
+    saveLayout: (layout, parent_id) => {
+      // saveToLS("hero", layout);
+      console.log("saving layout", layout, parent_id);
+      dispatch(customizationActions.saveLayoutToServer(layout, parent_id));
+    },
+    saveComponentManifest: (componentName, updatedComponent) => {
+      dispatch(
+        customizationActions.storeComponentManifestToServer(
+          componentName,
+          updatedComponent
+        )
+      );
+    },
+    updateComponentManifest: (data) => {
+      dispatch(customizationActions.updateComponentManifest(data));
+    },
+    getComponentsFromServer: () => {
+      dispatch(siteProfileActions.getComponentsFromServer());
+    },
+    addComponents: (components) => {
+      // components is an Arr of components;
+      // dispatch(siteProfileActions.addNewComponents(components));
+    },
+    updateComplete: (id, c) => {
+      dispatch(customizationActions.blueprintAndLayoutUpdateComplete());
+    },
+    ungroupComponents: (
+      selectedComponent,
+      layouts,
+      context,
+      currentBreakpoint
+    ) => {
+      dispatch(
+        customizationActions.ungroupComponents(
+          selectedComponent,
+          layouts,
+          context,
+          { currentBreakpoint }
+        )
+      );
+    },
+
+    updateBlueprint: (options, randomWord, context) => {
+      dispatch(
+        customizationActions.updateBlueprint(options, randomWord, context)
+      );
+    },
+    updateAutoResponsiveComps: (obj) => {
+      dispatch(customizationActions.updateAutoResponsiveComps(obj));
+    },
+    updateComponentProps: (data) => {
+      dispatch(customizationActions.updateComponentProps(data));
+    },
+  };
+};
+
+const ConnectedComponent = withRouter(
+  connect(
+    mapStateToProps,
+    mapDispatchToProps
+  )(ColumnsChild)
+);
+
+export default ConnectedComponent;
+
+const getTextType = (children) => {
+  let styleClassName;
+  if (children.indexOf(`class="paragraph"`) >= 0) {
+    styleClassName = "paragraph";
+  } else {
+    if (children.indexOf(`class="headerOne"`) >= 0) {
+      styleClassName = "headerOne";
+    } else if (children.indexOf(`lass="headerTwo`) >= 0) {
+      styleClassName = "headerTwo";
+    } else {
+      styleClassName = "headerTwo";
+    }
+  }
+
+  let styleValue;
+  if (styleClassName === "headerOne") {
+    styleValue = {
+      web: "52px",
+      tablet: "40px",
+      mobile: "30px",
+    };
+  } else if (styleClassName === "headerTwo") {
+    styleValue = {
+      web: "36px",
+      tablet: "28px",
+      mobile: "22px",
+    };
+  } else if (styleClassName === "paragraph") {
+    styleValue = {
+      web: "18px",
+      tablet: "16px",
+      mobile: "14px",
+    };
+  } else {
+    styleValue = {
+      web: "24px",
+      tablet: "30px",
+      mobile: "16px",
+    };
+  }
+  return styleValue;
+};
